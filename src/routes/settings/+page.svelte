@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { user, ratedJobs, theme, colorThemes, type ThemeMode, type ColorTheme } from '$lib/stores';
+	import { user, ratedJobs, theme, entries, type ThemeMode } from '$lib/stores';
 	import { SHIFTS } from '$lib/db';
 
 	// Form state - populated from user store
@@ -14,7 +14,6 @@
 	let graveyardRate = $state<number | null>($user?.graveyard_rate || null);
 	let averageHoursTarget = $state($user?.average_hours_target || 600);
 	let pensionTarget = $state<number | null>($user?.pension_target || null);
-	let geminiApiKey = $state($user?.gemini_api_key || '');
 
 	// Update local state when user store changes
 	$effect(() => {
@@ -30,7 +29,6 @@
 			graveyardRate = $user.graveyard_rate;
 			averageHoursTarget = $user.average_hours_target;
 			pensionTarget = $user.pension_target;
-			geminiApiKey = $user.gemini_api_key || '';
 		}
 	});
 
@@ -58,8 +56,7 @@
 				afternoon_rate: afternoonRate,
 				graveyard_rate: graveyardRate,
 				average_hours_target: averageHoursTarget,
-				pension_target: pensionTarget,
-				gemini_api_key: geminiApiKey.trim() || null
+				pension_target: pensionTarget
 			});
 
 			alert('Profile saved!');
@@ -68,6 +65,123 @@
 			alert('Failed to save profile. Please try again.');
 		} finally {
 			saving = false;
+		}
+	}
+
+	let csvInputRef = $state<HTMLInputElement | null>(null);
+	let paystubInputRef = $state<HTMLInputElement | null>(null);
+
+	function triggerCsvImport() {
+		csvInputRef?.click();
+	}
+
+	function triggerPaystubUpload() {
+		paystubInputRef?.click();
+	}
+
+	async function handlePaystubUpload(event: Event) {
+		const input = event.target as HTMLInputElement;
+		const file = input.files?.[0];
+		if (!file) return;
+
+		input.value = '';
+
+		// For now, just save the paystub as a document
+		try {
+			const { Filesystem, Directory } = await import('@capacitor/filesystem');
+			const { documents } = await import('$lib/stores');
+
+			const reader = new FileReader();
+			reader.onload = async (e) => {
+				const data = e.target?.result as string;
+				const base64Data = data.split(',')[1];
+
+				const ext = file.type.includes('pdf') ? 'pdf' : 'jpg';
+				const fileName = `paystub_${Date.now()}.${ext}`;
+
+				const savedFile = await Filesystem.writeFile({
+					path: `documents/${fileName}`,
+					data: base64Data,
+					directory: Directory.Data,
+					recursive: true
+				});
+
+				await documents.add({
+					name: `Pay Stub - ${new Date().toLocaleDateString('en-CA')}`,
+					type: ext === 'pdf' ? 'pdf' : 'image',
+					file_path: savedFile.uri || `documents/${fileName}`,
+					file_size: null,
+					mime_type: file.type,
+					category: 'pay_stub',
+					extracted_data: null,
+					notes: null
+				});
+
+				alert('Paystub saved to Documents!');
+			};
+			reader.readAsDataURL(file);
+		} catch (error) {
+			console.error('Paystub upload error:', error);
+			alert('Failed to upload paystub. Please try again.');
+		}
+	}
+
+	async function handleCsvImport(event: Event) {
+		const input = event.target as HTMLInputElement;
+		const file = input.files?.[0];
+		if (!file) return;
+
+		input.value = '';
+
+		try {
+			const text = await file.text();
+			// Parse CSV and add entries
+			const lines = text.split('\n').filter(line => line.trim());
+			if (lines.length < 2) {
+				alert('CSV file is empty or has no data rows.');
+				return;
+			}
+
+			// Skip header row, parse data rows
+			const dataRows = lines.slice(1);
+			let imported = 0;
+
+			for (const row of dataRows) {
+				// Simple CSV parsing (handles quoted fields)
+				const cells = row.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g)?.map(c => c.replace(/^"|"$/g, '').trim()) || [];
+
+				if (cells.length >= 3) {
+					const [date, shiftType, hours, jobName, earnings, location, ship] = cells;
+
+					// Normalize shift type
+					let normalizedShift: 'day' | 'afternoon' | 'graveyard' = 'day';
+					const shiftLower = (shiftType || '').toLowerCase();
+					if (shiftLower.includes('grave') || shiftLower.includes('night')) {
+						normalizedShift = 'graveyard';
+					} else if (shiftLower.includes('after') || shiftLower.includes('pm')) {
+						normalizedShift = 'afternoon';
+					}
+
+					await entries.add({
+						date: date || new Date().toISOString().split('T')[0],
+						shift_type: normalizedShift,
+						job_type: 'hall',
+						rated_job_id: null,
+						hall_job_name: jobName || 'Imported',
+						hours: parseFloat(hours) || 8,
+						location: location || null,
+						ship: ship || null,
+						notes: 'Imported from CSV',
+						earnings: earnings ? parseFloat(earnings) : null
+					});
+					imported++;
+				}
+			}
+
+			alert(`Successfully imported ${imported} entries!`);
+		} catch (error) {
+			console.error('Import error:', error);
+			alert('Failed to import CSV. Please check the file format.');
 		}
 	}
 
@@ -354,6 +468,52 @@
 		</div>
 	</section>
 
+	<!-- Data Section -->
+	<section>
+		<h2 class="text-lg font-semibold text-gray-900 mb-3">Data</h2>
+		<div class="space-y-3">
+			<button
+				onclick={triggerCsvImport}
+				class="card w-full text-left flex items-center gap-3 hover:bg-gray-50 transition-colors"
+			>
+				<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-blue-500">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+				</svg>
+				<div>
+					<p class="font-medium text-gray-900">Import CSV</p>
+					<p class="text-sm text-gray-500">Import entries from file</p>
+				</div>
+			</button>
+
+			<button
+				onclick={triggerPaystubUpload}
+				class="card w-full text-left flex items-center gap-3 hover:bg-gray-50 transition-colors"
+			>
+				<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-purple-500">
+					<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+				</svg>
+				<div>
+					<p class="font-medium text-gray-900">Upload Paystub</p>
+					<p class="text-sm text-gray-500">Save paystub to documents</p>
+				</div>
+			</button>
+		</div>
+		<input
+			type="file"
+			accept=".csv,text/csv"
+			bind:this={csvInputRef}
+			onchange={handleCsvImport}
+			class="hidden"
+		/>
+		<input
+			type="file"
+			accept="image/*,.pdf"
+			bind:this={paystubInputRef}
+			onchange={handlePaystubUpload}
+			class="hidden"
+		/>
+	</section>
+
 	<!-- Appearance Section -->
 	<section>
 		<h2 class="text-lg font-semibold text-gray-900 mb-3">Appearance</h2>
@@ -376,23 +536,6 @@
 				</div>
 			</div>
 
-			<!-- Color Theme -->
-			<div class="card py-2">
-				<label class="block font-medium text-gray-900 mb-2 text-sm">Accent Color</label>
-				<div class="grid grid-cols-5 gap-2">
-					{#each Object.entries(colorThemes) as [key, { primary }]}
-						<button
-							onclick={() => theme.setColorTheme(key as ColorTheme)}
-							class="flex justify-center"
-						>
-							<div
-								class="w-7 h-7 rounded-full transition-all {$theme.colorTheme === key ? 'ring-2 ring-offset-1 scale-110' : 'hover:scale-105'}"
-								style="background-color: {primary}; --tw-ring-color: {primary}; {key === 'white' ? 'border: 1px solid #d1d5db;' : ''}"
-							></div>
-						</button>
-					{/each}
-				</div>
-			</div>
 		</div>
 	</section>
 

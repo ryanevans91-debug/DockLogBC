@@ -297,7 +297,10 @@
 				<button
 					onclick={addJob}
 					disabled={!newJobName.trim()}
-					class="w-full py-2 bg-gray-100 text-gray-700 rounded-lg font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+					class="w-full py-2 rounded-lg font-medium transition-colors
+						{newJobName.trim()
+							? 'bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800'
+							: 'bg-gray-100 text-gray-400 cursor-not-allowed'}"
 				>
 					Add Job
 				</button>
@@ -344,7 +347,7 @@
 	{/if}
 
 	<!-- Navigation buttons -->
-	<div class="fixed bottom-0 left-0 right-0 p-4 bg-white border-t border-gray-200">
+	<div class="fixed bottom-0 left-0 right-0 p-4 bg-white border-t border-gray-200 pb-safe">
 		<div class="flex gap-3">
 			{#if step > 1}
 				<button
@@ -374,3 +377,9 @@
 		</div>
 	</div>
 </div>
+
+<style>
+	.pb-safe {
+		padding-bottom: max(1rem, env(safe-area-inset-bottom));
+	}
+</style>

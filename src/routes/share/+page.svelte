@@ -149,7 +149,7 @@
 	}
 </script>
 
-<div class="p-4 pb-24 space-y-4">
+<div class="p-4 pb-40 space-y-4">
 	<header class="flex items-center justify-between mb-4">
 		<div class="flex items-center gap-3">
 			<a href="/" class="p-2 -ml-2 text-gray-500 hover:text-gray-700">
@@ -257,15 +257,27 @@
 			{/if}
 		</section>
 
-		<!-- Add Group Button -->
-		<button
-			onclick={() => showAddGroup = true}
-			class="w-full card border-2 border-dashed border-gray-300 py-4 text-center hover:border-blue-400 hover:bg-blue-50 transition-colors"
-		>
-			<span class="font-medium text-gray-600">+ Add Group</span>
-		</button>
 	{/if}
 </div>
+
+<!-- Add Group Button (fixed above nav) -->
+<div class="fixed left-4 right-4 z-30 bottom-navbar">
+	<button
+		onclick={() => showAddGroup = true}
+		class="w-full card-elevated bg-blue-600 text-white py-4 text-center font-semibold shadow-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+	>
+		<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" class="w-5 h-5">
+			<path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+		</svg>
+		Add Group
+	</button>
+</div>
+
+<style>
+	.bottom-navbar {
+		bottom: calc(4rem + env(safe-area-inset-bottom));
+	}
+</style>
 
 <!-- Add Group Modal -->
 {#if showAddGroup}

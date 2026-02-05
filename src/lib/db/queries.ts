@@ -10,8 +10,8 @@ export const userQueries = {
 
   async create(user: Omit<User, 'id' | 'created_at'>): Promise<number> {
     const result = await database.run(
-      `INSERT INTO user (last_name, first_name, man_number, current_board, file_number, work_pin, day_rate, afternoon_rate, graveyard_rate, average_hours_target, pension_target, career_hours, gemini_api_key)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO user (last_name, first_name, man_number, current_board, file_number, work_pin, day_rate, afternoon_rate, graveyard_rate, average_hours_target, pension_target, career_hours, gemini_api_key, anthropic_api_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         user.last_name,
         user.first_name,
@@ -25,7 +25,8 @@ export const userQueries = {
         user.average_hours_target,
         user.pension_target,
         user.career_hours,
-        user.gemini_api_key
+        user.gemini_api_key,
+        user.anthropic_api_key
       ]
     );
     return result.lastId;
@@ -86,6 +87,10 @@ export const userQueries = {
     if (user.gemini_api_key !== undefined) {
       fields.push('gemini_api_key = ?');
       values.push(user.gemini_api_key);
+    }
+    if (user.anthropic_api_key !== undefined) {
+      fields.push('anthropic_api_key = ?');
+      values.push(user.anthropic_api_key);
     }
 
     if (fields.length > 0) {

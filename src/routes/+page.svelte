@@ -3,9 +3,11 @@
 	import { getAverageHoursStatus } from '$lib/utils';
 	import type { AverageHoursStatus } from '$lib/utils';
 	import { onMount } from 'svelte';
+	import { get } from 'svelte/store';
 	import { goto } from '$app/navigation';
 	import { Browser } from '@capacitor/browser';
-	import { parseTimesheetWithGemini, parseStatScheduleWithGemini, getGeminiApiKey, type ParsedTimesheetEntry } from '$lib/utils/gemini';
+	import { CapacitorHttp } from '@capacitor/core';
+	import { parseTimesheetWithGemini, parseStatScheduleWithGemini, parsePaystubWithClaude, getGeminiApiKey, getAnthropicApiKey, type ParsedTimesheetEntry } from '$lib/utils/gemini';
 	import { statHolidayQueries } from '$lib/db/queries';
 	import { loadStatHolidaysFromDb } from '$lib/constants/statHolidays';
 
@@ -20,6 +22,127 @@
 	let importFileName = $state('');
 	let importing = $state(false);
 	let parsingWithAI = $state(false);
+	let paystubInputRef = $state<HTMLInputElement | null>(null);
+	let showPaystubModal = $state(false);
+	let paystubData = $state<{
+		gross_pay?: number;
+		net_pay?: number;
+		hours_worked?: number;
+		hourly_rate?: number;
+		pay_period_start?: string;
+		pay_period_end?: string;
+	} | null>(null);
+	let paystubFile = $state<{ data: string; mimeType: string } | null>(null);
+	let processingPaystub = $state(false);
+
+	function triggerPaystubUpload() {
+		showDataModal = false;
+		paystubInputRef?.click();
+	}
+
+	async function handlePaystubUpload(event: Event) {
+		const input = event.target as HTMLInputElement;
+		const file = input.files?.[0];
+		if (!file) return;
+
+		input.value = '';
+
+		const apiKey = getAnthropicApiKey($user?.anthropic_api_key);
+		if (!apiKey) {
+			alert('Please add your Anthropic API key in Profile settings to extract paystub data.');
+			return;
+		}
+
+		processingPaystub = true;
+		const reader = new FileReader();
+		reader.onload = async (e) => {
+			try {
+				const data = e.target?.result as string;
+				paystubFile = { data: data.split(',')[1], mimeType: file.type };
+
+				// Use Claude AI to extract paystub data
+				const result = await parsePaystubWithClaude(apiKey, data);
+				console.log('Paystub result:', result);
+
+				if (result.success && result.data && !Array.isArray(result.data)) {
+					const extracted = result.data as any;
+					// Calculate hourly rate if we have gross pay and hours
+					let hourlyRate: number | undefined;
+					if (extracted.gross_pay && extracted.hours_worked) {
+						hourlyRate = Math.round((extracted.gross_pay / extracted.hours_worked) * 100) / 100;
+					}
+
+					paystubData = {
+						gross_pay: extracted.gross_pay,
+						net_pay: extracted.net_pay,
+						hours_worked: extracted.hours_worked,
+						hourly_rate: hourlyRate,
+						pay_period_start: extracted.pay_period_start,
+						pay_period_end: extracted.pay_period_end
+					};
+					processingPaystub = false;
+					showPaystubModal = true;
+				} else {
+					processingPaystub = false;
+					const errorMsg = result.error || 'Unknown error';
+					console.log('Paystub extraction failed:', errorMsg);
+					alert(`Could not extract data from paystub: ${errorMsg}`);
+				}
+			} catch (error) {
+				console.error('Paystub error:', error);
+				processingPaystub = false;
+				alert(`Failed to process paystub: ${error instanceof Error ? error.message : 'Unknown error'}`);
+			}
+		};
+		reader.readAsDataURL(file);
+	}
+
+	async function savePaystubAndUpdateRates() {
+		if (!paystubFile || !paystubData) return;
+
+		try {
+			// Save file to filesystem
+			const { Filesystem, Directory } = await import('@capacitor/filesystem');
+			const ext = paystubFile.mimeType.includes('pdf') ? 'pdf' : 'jpg';
+			const fileName = `paystub_${Date.now()}.${ext}`;
+			const savedFile = await Filesystem.writeFile({
+				path: `documents/${fileName}`,
+				data: paystubFile.data,
+				directory: Directory.Data,
+				recursive: true
+			});
+
+			// Save to documents
+			const { documents } = await import('$lib/stores');
+			const periodLabel = paystubData.pay_period_end
+				? new Date(paystubData.pay_period_end).toLocaleDateString('en-CA')
+				: new Date().toLocaleDateString('en-CA');
+
+			await documents.add({
+				name: `Pay Stub - ${periodLabel}`,
+				type: ext === 'pdf' ? 'pdf' : 'image',
+				file_path: savedFile.uri || `documents/${fileName}`,
+				file_size: null,
+				mime_type: paystubFile.mimeType,
+				category: 'pay_stub',
+				extracted_data: JSON.stringify(paystubData),
+				notes: null
+			});
+
+			// Update user's hourly rate if extracted
+			if (paystubData.hourly_rate && $user) {
+				await user.update({ day_rate: paystubData.hourly_rate });
+			}
+
+			showPaystubModal = false;
+			paystubData = null;
+			paystubFile = null;
+			alert('Pay stub saved! Your hourly rate has been updated.');
+		} catch (error) {
+			console.error('Save error:', error);
+			alert('Failed to save paystub.');
+		}
+	}
 
 	// Work pins data
 	interface WorkPins {
@@ -51,46 +174,58 @@
 		loading = false;
 	});
 
+	async function refreshWorkPins() {
+		pinsLoading = true;
+		await loadWorkPins();
+	}
+
 	async function loadAverageHoursStatus() {
 		avgHoursStatus = await getAverageHoursStatus($user);
 	}
 
 	async function loadWorkPins() {
 		try {
-			// Fetch from ILWU greaseboard - using a CORS proxy or direct fetch
-			const response = await fetch('https://ilwu502.ca/greaseboard/work-board/');
-			const html = await response.text();
+			// Use CapacitorHttp to bypass CORS on mobile
+			const response = await CapacitorHttp.get({
+				url: 'https://ilwu502.ca/greaseboard/work-pins/',
+				headers: {
+					'Accept': 'text/html'
+				}
+			});
+			const html = response.data;
 
-			// Parse the gbData from the HTML
-			const gbDataMatch = html.match(/var\s+gbData\s*=\s*(\{[\s\S]*?\});/);
+			// Parse the gbData from the HTML - need to match the full JSON object
+			const gbDataMatch = html.match(/var\s+gbData\s*=\s*(\{[\s\S]*?\});\s*\n/);
 			if (gbDataMatch) {
 				const gbData = JSON.parse(gbDataMatch[1]);
 
-				// Extract pin numbers from the data
-				// The structure has shifts with job categories containing pin ranges
-				if (gbData.shifts) {
-					const shifts = gbData.shifts;
+				// Get user's board (e.g., "A" from profile)
+				const userBoard = $user?.current_board?.toUpperCase() || '';
+				const boardSearchTerm = userBoard ? `${userBoard} BOARD` : 'WORK';
+
+				// Extract pin numbers from work_pins based on user's board
+				if (gbData.work_pins) {
+					const pins = gbData.work_pins;
+
+					// Helper to find board pin or fall back to WORK
+					const findBoardPin = (shiftJobs: any[]) => {
+						if (!shiftJobs || shiftJobs.length === 0) return '--';
+						// First try to find user's specific board
+						const boardJob = shiftJobs.find((j: any) => j.job === boardSearchTerm);
+						if (boardJob?.from) return boardJob.from;
+						// Fall back to WORK if no board match
+						const workJob = shiftJobs.find((j: any) => j.job === 'WORK');
+						return workJob?.from || '--';
+					};
 
 					// Day shift (8am)
-					if (shifts['8am']) {
-						const dayJobs = shifts['8am'].jobs || [];
-						const firstDayJob = dayJobs.find((j: any) => j.pin_from);
-						workPins.day = firstDayJob ? `${firstDayJob.pin_from}` : '--';
-					}
+					workPins.day = findBoardPin(pins.for_8am);
 
 					// Afternoon shift (4:30pm)
-					if (shifts['430pm']) {
-						const aftJobs = shifts['430pm'].jobs || [];
-						const firstAftJob = aftJobs.find((j: any) => j.pin_from);
-						workPins.afternoon = firstAftJob ? `${firstAftJob.pin_from}` : '--';
-					}
+					workPins.afternoon = findBoardPin(pins.for_430pm);
 
 					// Graveyard shift (1am)
-					if (shifts['1am']) {
-						const grvJobs = shifts['1am'].jobs || [];
-						const firstGrvJob = grvJobs.find((j: any) => j.pin_from);
-						workPins.graveyard = firstGrvJob ? `${firstGrvJob.pin_from}` : '--';
-					}
+					workPins.graveyard = findBoardPin(pins.for_1am);
 
 					workPins.lastUpdated = new Date().toLocaleTimeString('default', { hour: 'numeric', minute: '2-digit' });
 				}
@@ -146,7 +281,10 @@
 					const base64 = e.target?.result as string;
 
 					// Try stat schedule first
+					console.log('Trying to parse as stat schedule...');
 					const statResult = await parseStatScheduleWithGemini(apiKey, base64);
+					console.log('Stat result:', statResult);
+
 					if (statResult.success && statResult.holidays && statResult.holidays.length > 0) {
 						// It's a stat schedule - save directly to database
 						const year = statResult.year!;
@@ -169,7 +307,10 @@
 					}
 
 					// Not a stat schedule, try timesheet
+					console.log('Trying to parse as timesheet...');
 					const result = await parseTimesheetWithGemini(apiKey, null, base64);
+					console.log('Timesheet result:', result);
+
 					if (result.success && Array.isArray(result.data) && result.data.length > 0) {
 						importedData = result.data as ParsedTimesheetEntry[];
 						parsingWithAI = false;
@@ -177,7 +318,8 @@
 						showImportModal = true;
 					} else {
 						parsingWithAI = false;
-						alert('Could not recognize this document. Try a timesheet or stat schedule.');
+						const errorDetail = statResult.error || result.error || 'unknown format';
+						alert(`Could not recognize this document (${errorDetail}). Make sure the image clearly shows a timesheet or stat holiday schedule.`);
 					}
 				} else {
 					alert('Unsupported file type. Please use CSV, PDF, or image files.');
@@ -286,9 +428,57 @@
 		importFileName = '';
 	}
 
-	function exportToCsv() {
+	async function exportToCsv() {
 		showDataModal = false;
-		alert('CSV export coming soon!');
+
+		try {
+			// Load all entries
+			await entries.load();
+			const allEntries = get(entries);
+
+			if (allEntries.length === 0) {
+				alert('No entries to export.');
+				return;
+			}
+
+			// Create CSV header
+			const headers = ['Date', 'Shift Type', 'Hours', 'Job Name', 'Earnings', 'Location', 'Ship'];
+
+			// Create CSV rows
+			const rows = allEntries.map(entry => {
+				const jobName = entry.job_type === 'hall'
+					? entry.hall_job_name || 'Hall Job'
+					: 'Rated Job';
+
+				return [
+					entry.date,
+					entry.shift_type,
+					entry.hours.toString(),
+					jobName,
+					entry.earnings?.toString() || '',
+					entry.location || '',
+					entry.ship || ''
+				].map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(',');
+			});
+
+			const csvContent = [headers.join(','), ...rows].join('\n');
+
+			// Create download for web/mobile
+			const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+			const url = URL.createObjectURL(blob);
+			const link = document.createElement('a');
+			link.setAttribute('href', url);
+			link.setAttribute('download', `docklogger-export-${new Date().toISOString().split('T')[0]}.csv`);
+			document.body.appendChild(link);
+			link.click();
+			document.body.removeChild(link);
+			URL.revokeObjectURL(url);
+
+			alert(`Exported ${allEntries.length} entries to CSV!`);
+		} catch (error) {
+			console.error('Export error:', error);
+			alert('Failed to export data. Please try again.');
+		}
 	}
 </script>
 
@@ -298,7 +488,7 @@
 		<p class="text-gray-500 text-sm">Welcome back,</p>
 		<h1 class="text-2xl font-bold text-gray-900">{$userDisplayName}</h1>
 		{#if $user}
-			<p class="text-gray-500 text-sm">Man #{$user.man_number} {$user.current_board ? `| Board ${$user.current_board}` : ''}</p>
+			<p class="text-gray-500 text-sm">Man #{$user.man_number} {$user.current_board ? `| ${$user.current_board} Board` : ''}</p>
 		{/if}
 	</header>
 
@@ -349,14 +539,31 @@
 							<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
 						</svg>
 					</div>
-					<h3 class="font-medium text-gray-900">Work Pins</h3>
+					<div>
+						<h3 class="font-medium text-gray-900">Work Pins</h3>
+						{#if workPins.lastUpdated}
+							<p class="text-xs text-gray-400">Updated {workPins.lastUpdated}</p>
+						{/if}
+					</div>
 				</div>
-				<button
-					onclick={() => openExternalLink('https://ilwu502.ca/greaseboard/work-board-8am/?gb_data_refresh')}
-					class="font-medium text-blue-500 hover:text-blue-600"
-				>
-					Greaseboard
-				</button>
+				<div class="flex items-center gap-2">
+					<button
+						onclick={refreshWorkPins}
+						disabled={pinsLoading}
+						class="p-1.5 text-gray-400 hover:text-gray-600 disabled:opacity-50"
+						aria-label="Refresh work pins"
+					>
+						<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 {pinsLoading ? 'animate-spin' : ''}">
+							<path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+						</svg>
+					</button>
+					<button
+						onclick={() => openExternalLink('https://ilwu502.ca/greaseboard/work-pins/')}
+						class="font-medium text-blue-500 hover:text-blue-600 text-sm"
+					>
+						Greaseboard
+					</button>
+				</div>
 			</div>
 			{#if pinsLoading}
 				<div class="flex justify-center py-2">
@@ -436,23 +643,6 @@
 			</div>
 		</a>
 
-		<!-- Data Card -->
-		<button onclick={() => showDataModal = true} class="block w-full card hover:bg-gray-50 transition-colors text-left">
-			<div class="flex items-center gap-3">
-				<div class="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center">
-					<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 text-purple-600">
-						<path stroke-linecap="round" stroke-linejoin="round" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125" />
-					</svg>
-				</div>
-				<div class="flex-1">
-					<h3 class="font-medium text-gray-900">Data</h3>
-					<p class="text-sm text-gray-500">Import, export & upload</p>
-				</div>
-				<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 text-gray-400">
-					<path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
-				</svg>
-			</div>
-		</button>
 
 		<!-- Camera Card -->
 		<a href="/camera" class="block card-elevated bg-blue-600 text-white">
@@ -468,73 +658,6 @@
 	{/if}
 </div>
 
-<!-- Data Modal -->
-{#if showDataModal}
-	<div class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-		<div class="card w-full max-w-sm">
-			<div class="flex items-center justify-between mb-4">
-				<h2 class="text-lg font-semibold text-gray-900">Data</h2>
-				<button onclick={() => showDataModal = false} class="p-1 text-gray-500 hover:text-gray-700">
-					<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6">
-						<path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
-					</svg>
-				</button>
-			</div>
-
-			<div class="space-y-3">
-				<!-- Import Timesheets -->
-				<label class="card w-full text-left flex items-center gap-3 cursor-pointer hover:bg-gray-50 transition-colors {parsingWithAI ? 'opacity-50 pointer-events-none' : ''}">
-					{#if parsingWithAI}
-						<div class="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-					{:else}
-						<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-blue-500">
-							<path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
-						</svg>
-					{/if}
-					<div class="flex-1">
-						<p class="font-medium text-gray-900">{parsingWithAI ? 'Parsing with AI...' : 'Import Work Info'}</p>
-						<p class="text-sm text-gray-500">{parsingWithAI ? 'Extracting data' : 'Timesheets, stat schedules'}</p>
-					</div>
-					<input
-						type="file"
-						accept=".csv,.pdf,image/*"
-						onchange={handleFileImport}
-						disabled={parsingWithAI}
-						class="hidden"
-					/>
-				</label>
-
-				<!-- Export to CSV -->
-				<button
-					onclick={exportToCsv}
-					class="card w-full text-left flex items-center gap-3 hover:bg-gray-50 transition-colors"
-				>
-					<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-green-500">
-						<path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
-					</svg>
-					<div>
-						<p class="font-medium text-gray-900">Export to CSV</p>
-						<p class="text-sm text-gray-500">Download all entries</p>
-					</div>
-				</button>
-
-				<!-- Upload Paystub -->
-				<button
-					onclick={() => { showDataModal = false; goto('/documents'); }}
-					class="card w-full text-left flex items-center gap-3 hover:bg-gray-50 transition-colors"
-				>
-					<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-6 h-6 text-purple-500">
-						<path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
-					</svg>
-					<div>
-						<p class="font-medium text-gray-900">Upload Paystub</p>
-						<p class="text-sm text-gray-500">For net pay estimates</p>
-					</div>
-				</button>
-			</div>
-		</div>
-	</div>
-{/if}
 
 <!-- Import Verification Modal -->
 {#if showImportModal}
@@ -598,3 +721,86 @@
 		</div>
 	</div>
 {/if}
+
+<!-- Paystub Data Modal -->
+{#if showPaystubModal && paystubData}
+	<div class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+		<div class="card w-full max-w-sm">
+			<h2 class="text-lg font-semibold text-gray-900 mb-4">Paystub Data Extracted</h2>
+
+			<div class="space-y-3 mb-6">
+				{#if paystubData.gross_pay}
+					<div class="flex justify-between">
+						<span class="text-gray-600">Gross Pay:</span>
+						<span class="font-semibold text-gray-900">${paystubData.gross_pay.toFixed(2)}</span>
+					</div>
+				{/if}
+				{#if paystubData.net_pay}
+					<div class="flex justify-between">
+						<span class="text-gray-600">Net Pay:</span>
+						<span class="font-semibold text-green-600">${paystubData.net_pay.toFixed(2)}</span>
+					</div>
+				{/if}
+				{#if paystubData.hours_worked}
+					<div class="flex justify-between">
+						<span class="text-gray-600">Hours Worked:</span>
+						<span class="font-semibold text-gray-900">{paystubData.hours_worked} hrs</span>
+					</div>
+				{/if}
+				{#if paystubData.hourly_rate}
+					<div class="flex justify-between p-2 bg-blue-50 rounded-lg">
+						<span class="text-blue-700">Calculated Hourly Rate:</span>
+						<span class="font-bold text-blue-700">${paystubData.hourly_rate.toFixed(2)}/hr</span>
+					</div>
+				{/if}
+				{#if paystubData.pay_period_start && paystubData.pay_period_end}
+					<div class="flex justify-between text-sm">
+						<span class="text-gray-500">Pay Period:</span>
+						<span class="text-gray-600">{paystubData.pay_period_start} to {paystubData.pay_period_end}</span>
+					</div>
+				{/if}
+			</div>
+
+			{#if paystubData.hourly_rate}
+				<p class="text-sm text-gray-600 mb-4">
+					Save this paystub and update your hourly rate to ${paystubData.hourly_rate.toFixed(2)}/hr?
+				</p>
+			{/if}
+
+			<div class="grid grid-cols-2 gap-3">
+				<button
+					onclick={() => { showPaystubModal = false; paystubData = null; paystubFile = null; }}
+					class="py-2 border border-gray-300 rounded-lg text-gray-700"
+				>
+					Cancel
+				</button>
+				<button
+					onclick={savePaystubAndUpdateRates}
+					class="py-2 bg-blue-600 text-white rounded-lg font-medium"
+				>
+					Save & Update
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- Processing Paystub Indicator -->
+{#if processingPaystub}
+	<div class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+		<div class="card w-full max-w-xs text-center py-8">
+			<div class="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+			<p class="text-gray-700 font-medium">Reading paystub...</p>
+			<p class="text-sm text-gray-500">Extracting pay info with AI</p>
+		</div>
+	</div>
+{/if}
+
+<!-- Hidden file input for paystub upload -->
+<input
+	type="file"
+	accept="image/*,.pdf"
+	bind:this={paystubInputRef}
+	onchange={handlePaystubUpload}
+	class="hidden"
+/>

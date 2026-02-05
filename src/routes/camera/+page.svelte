@@ -4,22 +4,11 @@
 	import { goto } from '$app/navigation';
 	import { documents } from '$lib/stores';
 
-	let capturedImage = $state<string | null>(null);
-	let selectedCategory = $state<string>('manning_sheet');
-	let docName = $state('');
-	let notes = $state('');
 	let saving = $state(false);
+	let error = $state<string | null>(null);
 
-	const categories = [
-		{ value: 'manning_sheet', label: 'Manning Sheet' },
-		{ value: 'toolbox_talk', label: 'Toolbox Talk' },
-		{ value: 'vacation_pay', label: 'Vacation Pay' },
-		{ value: 'pay_stub', label: 'Pay Stub' },
-		{ value: 'timesheet', label: 'Timesheet' },
-		{ value: 'other', label: 'Other' }
-	];
-
-	async function takePhoto() {
+	async function takeAndSave() {
+		error = null;
 		try {
 			const photo = await Camera.getPhoto({
 				quality: 90,
@@ -29,19 +18,19 @@
 			});
 
 			if (photo.dataUrl) {
-				capturedImage = photo.dataUrl;
-				// Generate default name based on category and date
-				const date = new Date().toLocaleDateString('en-CA');
-				const categoryLabel = categories.find(c => c.value === selectedCategory)?.label || 'Document';
-				docName = `${categoryLabel} - ${date}`;
+				await saveDocument(photo.dataUrl);
 			}
-		} catch (error) {
-			console.error('Camera error:', error);
+		} catch (err) {
 			// User cancelled or error occurred
+			console.error('Camera error:', err);
+			if (err instanceof Error && !err.message.includes('cancelled')) {
+				error = 'Camera access failed. Please try again.';
+			}
 		}
 	}
 
-	async function pickFromGallery() {
+	async function pickAndSave() {
+		error = null;
 		try {
 			const photo = await Camera.getPhoto({
 				quality: 90,
@@ -51,57 +40,59 @@
 			});
 
 			if (photo.dataUrl) {
-				capturedImage = photo.dataUrl;
-				const date = new Date().toLocaleDateString('en-CA');
-				const categoryLabel = categories.find(c => c.value === selectedCategory)?.label || 'Document';
-				docName = `${categoryLabel} - ${date}`;
+				await saveDocument(photo.dataUrl);
 			}
-		} catch (error) {
-			console.error('Gallery error:', error);
+		} catch (err) {
+			console.error('Gallery error:', err);
+			if (err instanceof Error && !err.message.includes('cancelled')) {
+				error = 'Could not access photos. Please try again.';
+			}
 		}
 	}
 
-	async function saveDocument() {
-		if (!capturedImage || !docName.trim() || saving) return;
-
+	async function saveDocument(dataUrl: string) {
+		if (saving) return;
 		saving = true;
+		error = null;
 
 		try {
+			// Generate document name based on date and time
+			const now = new Date();
+			const date = now.toLocaleDateString('en-CA');
+			const time = now.toLocaleTimeString('en-CA', { hour: '2-digit', minute: '2-digit', hour12: false }).replace(':', '');
+			const docName = `Document - ${date} ${time}`;
+
+			// Extract base64 data (remove data URL prefix)
+			const base64Data = dataUrl.split(',')[1];
+
 			// Save image to filesystem
 			const fileName = `doc_${Date.now()}.jpg`;
 			const savedFile = await Filesystem.writeFile({
 				path: `documents/${fileName}`,
-				data: capturedImage,
+				data: base64Data,
 				directory: Directory.Data,
 				recursive: true
 			});
 
 			// Save to database
 			await documents.add({
-				name: docName.trim(),
+				name: docName,
 				type: 'image',
 				file_path: savedFile.uri || `documents/${fileName}`,
 				file_size: null,
 				mime_type: 'image/jpeg',
-				category: selectedCategory as any,
+				category: 'other',
 				extracted_data: null,
-				notes: notes.trim() || null
+				notes: null
 			});
 
 			// Navigate to documents page
 			goto('/documents');
-		} catch (error) {
-			console.error('Save error:', error);
-			alert('Failed to save document. Please try again.');
-		} finally {
+		} catch (err) {
+			console.error('Save error:', err);
+			error = 'Failed to save document. Please try again.';
 			saving = false;
 		}
-	}
-
-	function retake() {
-		capturedImage = null;
-		docName = '';
-		notes = '';
 	}
 </script>
 
@@ -115,27 +106,24 @@
 		<h1 class="text-2xl font-bold text-gray-900">Camera</h1>
 	</header>
 
-	{#if !capturedImage}
-		<!-- Camera/Gallery Selection -->
+	{#if saving}
+		<div class="flex flex-col items-center justify-center py-16">
+			<div class="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4"></div>
+			<p class="text-gray-600">Saving document...</p>
+		</div>
+	{:else}
 		<div class="space-y-4">
 			<p class="text-gray-600 text-center">Capture manning sheets, toolbox talks, and other work documents</p>
 
-			<!-- Category Selection First -->
-			<div class="card">
-				<label class="block font-medium text-gray-900 mb-2">Document Type</label>
-				<select
-					bind:value={selectedCategory}
-					class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-				>
-					{#each categories as cat}
-						<option value={cat.value}>{cat.label}</option>
-					{/each}
-				</select>
-			</div>
+			{#if error}
+				<div class="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm text-center">
+					{error}
+				</div>
+			{/if}
 
 			<div class="grid grid-cols-2 gap-3">
 				<button
-					onclick={takePhoto}
+					onclick={takeAndSave}
 					class="card-elevated py-8 flex flex-col items-center gap-3 hover:bg-gray-50 transition-colors"
 				>
 					<div class="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center">
@@ -148,7 +136,7 @@
 				</button>
 
 				<button
-					onclick={pickFromGallery}
+					onclick={pickAndSave}
 					class="card-elevated py-8 flex flex-col items-center gap-3 hover:bg-gray-50 transition-colors"
 				>
 					<div class="w-16 h-16 bg-purple-100 rounded-full flex items-center justify-center">
@@ -157,73 +145,6 @@
 						</svg>
 					</div>
 					<span class="font-medium text-gray-900">From Gallery</span>
-				</button>
-			</div>
-		</div>
-	{:else}
-		<!-- Image Preview & Save Form -->
-		<div class="space-y-4">
-			<!-- Image Preview -->
-			<div class="card p-2">
-				<img
-					src={capturedImage}
-					alt="Captured document"
-					class="w-full rounded-lg"
-				/>
-			</div>
-
-			<!-- Document Details Form -->
-			<div class="card space-y-4">
-				<div>
-					<label for="docName" class="block font-medium text-gray-900 mb-1">Document Name</label>
-					<input
-						id="docName"
-						type="text"
-						bind:value={docName}
-						placeholder="Enter document name"
-						class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-					/>
-				</div>
-
-				<div>
-					<label for="category" class="block font-medium text-gray-900 mb-1">Category</label>
-					<select
-						id="category"
-						bind:value={selectedCategory}
-						class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-					>
-						{#each categories as cat}
-							<option value={cat.value}>{cat.label}</option>
-						{/each}
-					</select>
-				</div>
-
-				<div>
-					<label for="notes" class="block font-medium text-gray-900 mb-1">Notes (optional)</label>
-					<textarea
-						id="notes"
-						bind:value={notes}
-						placeholder="Add any notes..."
-						rows="2"
-						class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-					></textarea>
-				</div>
-			</div>
-
-			<!-- Action Buttons -->
-			<div class="grid grid-cols-2 gap-3">
-				<button
-					onclick={retake}
-					class="py-3 border border-gray-300 rounded-lg font-medium text-gray-700 hover:bg-gray-50"
-				>
-					Retake
-				</button>
-				<button
-					onclick={saveDocument}
-					disabled={!docName.trim() || saving}
-					class="py-3 bg-blue-600 text-white rounded-lg font-semibold disabled:opacity-50"
-				>
-					{saving ? 'Saving...' : 'Save'}
 				</button>
 			</div>
 		</div>

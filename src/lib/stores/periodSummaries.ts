@@ -69,7 +69,7 @@ function createPeriodSummariesStore() {
 
     async load() {
       try {
-        const result = await database.select<PeriodSummary[]>(
+        const result = await database.query<PeriodSummary>(
           'SELECT * FROM period_summaries ORDER BY period_start DESC'
         );
         set(result);
@@ -85,7 +85,7 @@ function createPeriodSummariesStore() {
         const previousPeriod = getPreviousHalfYearPeriod();
 
         // Check if we already have a summary for the previous period
-        const existingSummary = await database.select<PeriodSummary[]>(
+        const existingSummary = await database.query<PeriodSummary>(
           'SELECT * FROM period_summaries WHERE period_start = ? AND period_end = ?',
           [previousPeriod.start, previousPeriod.end]
         );
@@ -96,7 +96,7 @@ function createPeriodSummariesStore() {
         }
 
         // Check if we have any entries for the previous period
-        const entries = await database.select<{ count: number; hours: number; earnings: number }[]>(
+        const entries = await database.query<{ count: number; hours: number; earnings: number }>(
           `SELECT COUNT(*) as count, COALESCE(SUM(hours), 0) as hours, COALESCE(SUM(earnings), 0) as earnings
            FROM entries WHERE date >= ? AND date <= ?`,
           [previousPeriod.start, previousPeriod.end]
@@ -122,7 +122,7 @@ function createPeriodSummariesStore() {
         };
 
         // Save to period_summaries table
-        await database.execute(
+        await database.run(
           `INSERT INTO period_summaries (period_type, period_start, period_end, total_hours, total_earnings, days_worked, summary_data)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
           ['half_year', previousPeriod.start, previousPeriod.end, hours, earnings, count, JSON.stringify(summaryData)]
@@ -175,7 +175,7 @@ Generated: ${new Date().toLocaleDateString()}
 
     async getLatestSummary(): Promise<PeriodSummary | null> {
       try {
-        const result = await database.select<PeriodSummary[]>(
+        const result = await database.query<PeriodSummary>(
           'SELECT * FROM period_summaries ORDER BY period_start DESC LIMIT 1'
         );
         return result[0] || null;

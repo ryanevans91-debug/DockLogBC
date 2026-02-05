@@ -1,13 +1,22 @@
-// Gemini API utility for parsing timesheets and paystubs
+// AI API utility for parsing timesheets and paystubs
+// Supports both Anthropic (Claude) and Gemini APIs
 
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+import { CapacitorHttp } from '@capacitor/core';
+
+const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
+const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
 
 // Get API key from environment variable (fallback)
-const ENV_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || '';
+const ENV_GEMINI_KEY = import.meta.env.VITE_GEMINI_API_KEY || '';
+const ENV_ANTHROPIC_KEY = import.meta.env.VITE_ANTHROPIC_API_KEY || '';
 
 // Helper to get the API key (user's key takes priority, then env)
 export function getGeminiApiKey(userKey?: string | null): string {
-  return userKey || ENV_API_KEY;
+  return userKey || ENV_GEMINI_KEY;
+}
+
+export function getAnthropicApiKey(userKey?: string | null): string {
+  return userKey || ENV_ANTHROPIC_KEY;
 }
 
 export interface ParsedTimesheetEntry {
@@ -39,6 +48,96 @@ export interface GeminiResponse {
   success: boolean;
   data?: ParsedTimesheetEntry[] | ParsedPaystubData;
   error?: string;
+}
+
+async function callClaude(apiKey: string, prompt: string, imageBase64?: string): Promise<string> {
+  const content: Array<{ type: string; text?: string; source?: { type: string; media_type: string; data: string } }> = [];
+
+  if (imageBase64) {
+    // Extract mime type and data from base64 string
+    const matches = imageBase64.match(/^data:(.+);base64,(.+)$/);
+    if (matches) {
+      let mediaType = matches[1];
+      const data = matches[2];
+
+      // Normalize and validate media types
+      // Claude vision supports: image/jpeg, image/png, image/gif, image/webp
+      // Claude also supports PDF as document type
+      if (mediaType === 'image/jpg') {
+        mediaType = 'image/jpeg';
+      }
+
+      if (mediaType === 'application/pdf') {
+        // PDFs use document type
+        content.push({
+          type: 'document',
+          source: {
+            type: 'base64',
+            media_type: 'application/pdf',
+            data: data
+          }
+        });
+      } else if (['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(mediaType)) {
+        // Standard image types
+        content.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: mediaType,
+            data: data
+          }
+        });
+      } else {
+        // Try as jpeg if unknown image type
+        console.warn(`Unknown media type: ${mediaType}, attempting as image/jpeg`);
+        content.push({
+          type: 'image',
+          source: {
+            type: 'base64',
+            media_type: 'image/jpeg',
+            data: data
+          }
+        });
+      }
+    }
+  }
+
+  content.push({ type: 'text', text: prompt });
+
+  const requestBody = {
+    model: 'claude-3-5-sonnet-20241022',
+    max_tokens: 4096,
+    messages: [
+      {
+        role: 'user',
+        content
+      }
+    ]
+  };
+
+  console.log('Calling Claude API with content types:', content.map(c => c.type));
+
+  const response = await CapacitorHttp.post({
+    url: ANTHROPIC_API_URL,
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01'
+    },
+    data: requestBody
+  });
+
+  console.log('Claude API response status:', response.status);
+
+  if (response.status !== 200) {
+    console.error('Claude API error:', response.data);
+    const errorMsg = response.data?.error?.message || `API request failed with status ${response.status}`;
+    throw new Error(errorMsg);
+  }
+
+  const text = response.data?.content?.[0]?.text || '';
+  console.log('Claude API returned text:', text.substring(0, 200));
+  return text;
 }
 
 async function callGemini(apiKey: string, prompt: string, imageBase64?: string): Promise<string> {
@@ -150,35 +249,45 @@ export async function parsePaystubWithGemini(
   apiKey: string,
   imageBase64: string
 ): Promise<GeminiResponse> {
-  const prompt = `You are a paystub data extractor for Canadian longshoremen. Analyze this paystub image and extract financial information.
+  // Legacy function - redirects to Claude
+  return parsePaystubWithClaude(apiKey, imageBase64);
+}
 
-Extract these fields (use null if not found):
-- gross_pay: Total gross earnings (number)
-- net_pay: Take-home pay after deductions (number)
-- federal_tax: Federal income tax deducted (number)
-- provincial_tax: Provincial income tax deducted (number)
-- cpp: Canada Pension Plan contribution (number)
-- ei: Employment Insurance premium (number)
-- union_dues: Union dues deducted (number)
-- pension_contribution: Pension plan contribution (number)
-- other_deductions: Sum of any other deductions (number)
-- pay_period_start: Start date of pay period (YYYY-MM-DD)
-- pay_period_end: End date of pay period (YYYY-MM-DD)
-- hours_worked: Total hours worked in this period (number)
+export async function parsePaystubWithClaude(
+  apiKey: string,
+  imageBase64: string
+): Promise<GeminiResponse> {
+  const prompt = `You are a JSON data extractor. Extract pay information from this paystub image and return ONLY a JSON object.
 
-Return ONLY a valid JSON object. No markdown, no explanation, just the JSON object.
-Example:
-{"gross_pay":2500.00,"net_pay":1850.00,"federal_tax":320.00,"provincial_tax":180.00,"cpp":95.00,"ei":45.00,"union_dues":50.00,"pension_contribution":null,"other_deductions":10.00,"pay_period_start":"2024-01-01","pay_period_end":"2024-01-15","hours_worked":80}`;
+Extract these values as numbers (no currency symbols, just the number):
+- gross_pay: Total earnings before deductions
+- net_pay: Take-home pay after deductions
+- hours_worked: Total hours worked
+- federal_tax: Federal/income tax deducted
+- provincial_tax: Provincial/state tax deducted
+- cpp: Canada Pension Plan contribution
+- ei: Employment Insurance contribution
+- union_dues: Union dues deducted
+- pension_contribution: Pension/retirement contribution
+- pay_period_start: Start date as "YYYY-MM-DD"
+- pay_period_end: End date as "YYYY-MM-DD"
+
+Respond with ONLY this JSON structure, nothing else:
+{"gross_pay":0,"net_pay":0,"hours_worked":0,"federal_tax":null,"provincial_tax":null,"cpp":null,"ei":null,"union_dues":null,"pension_contribution":null,"pay_period_start":null,"pay_period_end":null}
+
+Replace 0 with actual values found. Use null for fields not found. NO explanations, NO markdown, ONLY the JSON object.`;
 
   try {
-    const response = await callGemini(apiKey, prompt, imageBase64);
+    const response = await callClaude(apiKey, prompt, imageBase64);
+    console.log('Paystub Claude raw response:', response);
 
     // Extract JSON from response
     let jsonStr = response.trim();
+
+    // Remove markdown code blocks if present
     if (jsonStr.startsWith('```json')) {
       jsonStr = jsonStr.slice(7);
-    }
-    if (jsonStr.startsWith('```')) {
+    } else if (jsonStr.startsWith('```')) {
       jsonStr = jsonStr.slice(3);
     }
     if (jsonStr.endsWith('```')) {
@@ -186,11 +295,25 @@ Example:
     }
     jsonStr = jsonStr.trim();
 
-    const data = JSON.parse(jsonStr) as ParsedPaystubData;
+    // Try to find JSON object in the response
+    const jsonMatch = jsonStr.match(/\{[^{}]*\}/);
+    if (jsonMatch) {
+      jsonStr = jsonMatch[0];
+    }
 
-    return { success: true, data };
+    console.log('Paystub JSON to parse:', jsonStr);
+
+    const data = JSON.parse(jsonStr) as ParsedPaystubData;
+    console.log('Parsed paystub data:', data);
+
+    // Check if we got at least some useful data
+    if (data.gross_pay || data.net_pay || data.hours_worked) {
+      return { success: true, data };
+    } else {
+      return { success: false, error: `No pay data found. Claude returned: ${response.substring(0, 200)}` };
+    }
   } catch (error) {
-    console.error('Gemini paystub parsing error:', error);
+    console.error('Claude paystub parsing error:', error);
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Failed to parse paystub'
@@ -247,26 +370,32 @@ export async function parseStatScheduleWithGemini(
   apiKey: string,
   imageBase64: string
 ): Promise<StatScheduleResponse> {
-  const prompt = `You are extracting statutory holiday information from an ILWU (longshoremen union) schedule document.
+  const prompt = `Analyze this image. If it contains a statutory holiday schedule (stat holidays, stat pay schedule, BC statutory holidays), extract the holiday information.
 
-Extract ALL stat holidays shown with their:
-- name: Holiday name (e.g., "New Year's Day", "Family Day", "Good Friday")
-- date: The actual stat holiday date in YYYY-MM-DD format
-- qualification_start: Start date of the 30-day qualifying window in YYYY-MM-DD format
-- qualification_end: End date of the qualifying window in YYYY-MM-DD format
-- pay_date: When stat pay is received (YYYY-MM-DD), if shown
+Look for tables or lists showing:
+- Holiday names (New Year's Day, Family Day, Good Friday, Victoria Day, Canada Day, BC Day, Labour Day, Thanksgiving, Remembrance Day, Christmas Day, Boxing Day, etc.)
+- Holiday dates
+- Qualifying period dates (30-day qualifying window, qualification period)
+- Pay dates (when stat pay is issued)
 
-The qualifying window is typically labeled as "30 Day Qualifying Period" or similar. Workers need to work 15 days within this window to get full stat pay.
+For each holiday found, extract:
+- name: The holiday name
+- date: Holiday date in YYYY-MM-DD format
+- qualification_start: First day of qualifying period in YYYY-MM-DD format
+- qualification_end: Last day of qualifying period in YYYY-MM-DD format
+- pay_date: Pay date in YYYY-MM-DD format (if shown, otherwise null)
 
-Also determine the YEAR these holidays are for.
+Determine the year from the dates shown.
 
-Return ONLY valid JSON in this exact format:
-{"year":2026,"holidays":[{"name":"New Year's Day","date":"2026-01-01","qualification_start":"2025-11-30","qualification_end":"2025-12-27","pay_date":"2026-01-08"}]}
+Return ONLY a JSON object (no markdown, no explanation):
+{"year":2026,"holidays":[{"name":"New Year's Day","date":"2026-01-01","qualification_start":"2025-11-30","qualification_end":"2025-12-29","pay_date":"2026-01-15"}]}
 
-If you cannot parse the schedule, return: {"error":"Could not parse stat schedule"}`;
+If this is NOT a stat holiday schedule, return exactly:
+{"error":"not_stat_schedule"}`;
 
   try {
     const response = await callGemini(apiKey, prompt, imageBase64);
+    console.log('Stat schedule Gemini response:', response);
 
     // Extract JSON from response
     let jsonStr = response.trim();
@@ -281,14 +410,22 @@ If you cannot parse the schedule, return: {"error":"Could not parse stat schedul
     }
     jsonStr = jsonStr.trim();
 
+    // Try to find JSON in the response if it's wrapped in text
+    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      jsonStr = jsonMatch[0];
+    }
+
     const data = JSON.parse(jsonStr);
 
     if (data.error) {
+      console.log('Stat schedule parse returned error:', data.error);
       return { success: false, error: data.error };
     }
 
     // Validate the parsed data
     if (!data.year || !data.holidays || !Array.isArray(data.holidays)) {
+      console.log('Stat schedule invalid format:', data);
       return { success: false, error: 'Invalid data format' };
     }
 

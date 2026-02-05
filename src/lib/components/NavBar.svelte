@@ -72,7 +72,7 @@
   }
 </script>
 
-<nav class="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 pb-safe z-50">
+<nav class="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 z-50 nav-safe">
   <div class="flex justify-around items-center h-16">
     {#each navItems as item}
       {@const active = isActive(item.href, $page.url.pathname)}
@@ -101,8 +101,8 @@
 </nav>
 
 <style>
-  .pb-safe {
-    padding-bottom: env(safe-area-inset-bottom);
+  .nav-safe {
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
   }
 
   .add-button {

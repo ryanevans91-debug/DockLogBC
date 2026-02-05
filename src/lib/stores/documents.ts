@@ -10,7 +10,7 @@ function createDocumentsStore() {
 
     async load() {
       try {
-        const result = await database.select<Document[]>(
+        const result = await database.query<Document>(
           'SELECT * FROM documents ORDER BY created_at DESC'
         );
         set(result);
@@ -22,14 +22,14 @@ function createDocumentsStore() {
 
     async add(doc: Omit<Document, 'id' | 'created_at'>) {
       try {
-        const result = await database.execute(
+        const result = await database.run(
           `INSERT INTO documents (name, type, file_path, file_size, mime_type, category, extracted_data, notes)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
           [doc.name, doc.type, doc.file_path, doc.file_size, doc.mime_type, doc.category, doc.extracted_data, doc.notes]
         );
 
         const newDoc: Document = {
-          id: result.lastInsertId as number,
+          id: result.lastId,
           ...doc,
           created_at: new Date().toISOString()
         };
@@ -54,7 +54,7 @@ function createDocumentsStore() {
 
         values.push(id);
 
-        await database.execute(
+        await database.run(
           `UPDATE documents SET ${setClauses.join(', ')} WHERE id = ?`,
           values
         );
@@ -68,7 +68,7 @@ function createDocumentsStore() {
 
     async remove(id: number) {
       try {
-        await database.execute('DELETE FROM documents WHERE id = ?', [id]);
+        await database.run('DELETE FROM documents WHERE id = ?', [id]);
         update(docs => docs.filter(d => d.id !== id));
       } catch (error) {
         console.error('Failed to delete document:', error);
@@ -78,7 +78,7 @@ function createDocumentsStore() {
 
     async getByCategory(category: Document['category']) {
       try {
-        const result = await database.select<Document[]>(
+        const result = await database.query<Document>(
           'SELECT * FROM documents WHERE category = ? ORDER BY created_at DESC',
           [category]
         );

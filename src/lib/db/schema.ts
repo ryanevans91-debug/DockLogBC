@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS user (
   pension_target REAL,
   career_hours REAL DEFAULT 0,
   gemini_api_key TEXT,
+  anthropic_api_key TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -114,9 +115,29 @@ export async function initializeSchema(): Promise<void> {
   try {
     await database.execute(SCHEMA);
     console.log('Database schema initialized');
+
+    // Run migrations for existing databases
+    await runMigrations();
   } catch (error) {
     console.error('Schema initialization error:', error);
     throw error;
+  }
+}
+
+// Run database migrations for schema updates
+async function runMigrations(): Promise<void> {
+  try {
+    // Migration: Add anthropic_api_key column to user table if it doesn't exist
+    const userColumns = await database.query<{ name: string }>(`PRAGMA table_info(user)`);
+    const hasAnthropicKey = userColumns.some(col => col.name === 'anthropic_api_key');
+
+    if (!hasAnthropicKey) {
+      await database.execute(`ALTER TABLE user ADD COLUMN anthropic_api_key TEXT`);
+      console.log('Migration: Added anthropic_api_key column to user table');
+    }
+  } catch (error) {
+    console.error('Migration error:', error);
+    // Don't throw - migrations are best-effort
   }
 }
 
@@ -136,6 +157,7 @@ export interface User {
   pension_target: number | null;
   career_hours: number;
   gemini_api_key: string | null;
+  anthropic_api_key: string | null;
   created_at: string;
 }
 

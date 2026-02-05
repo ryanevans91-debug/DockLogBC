@@ -92,7 +92,7 @@
 		</div>
 	</div>
 {:else}
-	<main class="min-h-screen pb-20">
+	<main class="min-h-screen main-padding">
 		{@render children()}
 	</main>
 
@@ -100,3 +100,9 @@
 		<NavBar />
 	{/if}
 {/if}
+
+<style>
+	.main-padding {
+		padding-bottom: calc(5rem + env(safe-area-inset-bottom, 0px));
+	}
+</style>

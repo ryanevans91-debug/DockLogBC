@@ -3,11 +3,13 @@
 	import { goto } from '$app/navigation';
 	import { entries, ratedJobs, formatCurrency, timeOff } from '$lib/stores';
 	import type { Entry, TimeOff } from '$lib/db';
+	import { getStatHolidaysForYear, type StatHoliday } from '$lib/constants/statHolidays';
 
 	// Calendar state
 	let currentDate = $state(new Date());
 	let monthEntries = $state<Entry[]>([]);
 	let monthTimeOff = $state<TimeOff[]>([]);
+	let monthStatHolidays = $state<StatHoliday[]>([]);
 	let selectedDate = $state<string | null>(null);
 	let lastClickTime = $state(0);
 	let lastClickDate = $state<string | null>(null);
@@ -78,6 +80,12 @@
 		return monthTimeOff.find(t => t.date === dateStr) || null;
 	}
 
+	// Get stat holiday for a specific date
+	function getStatHolidayForDate(day: number): StatHoliday | null {
+		const dateStr = makeDateString(currentYear, currentMonth, day);
+		return monthStatHolidays.find(h => h.date === dateStr) || null;
+	}
+
 	// Check if date has entries
 	function hasEntries(day: number): boolean {
 		return getEntriesForDate(day).length > 0;
@@ -134,6 +142,11 @@
 		await timeOff.load();
 		monthTimeOff = $timeOff.filter(t => {
 			return t.date >= startDate && t.date <= endDate;
+		});
+		// Load stat holidays for this month
+		const yearHolidays = getStatHolidaysForYear(currentYear);
+		monthStatHolidays = yearHolidays.filter(h => {
+			return h.date >= startDate && h.date <= endDate;
 		});
 	}
 
@@ -208,20 +221,25 @@
 					{@const dayTimeOff = getTimeOffForDate(day)}
 					{@const isVacation = dayTimeOff?.type === 'vacation'}
 					{@const isSick = dayTimeOff?.type === 'sick'}
+					{@const statHoliday = getStatHolidayForDate(day)}
 					<button
 						onclick={() => handleDayClick(day, dayEntries)}
 						class="aspect-square flex flex-col items-center justify-center rounded-lg text-sm transition-colors relative
 							{isToday(day) ? 'ring-2 ring-blue-600' : ''}
-							{isSelected ? 'ring-2 ring-green-500' : ''}
-							{isSelected && hasWork ? 'bg-blue-600 text-white' : ''}
+							{isSelected && !hasWork ? 'border-2 border-green-500' : ''}
+							{isSelected && hasWork ? 'bg-blue-600 text-white ring-2 ring-green-500' : ''}
 							{hasWork && !isSelected ? 'bg-blue-600 text-white' : ''}
-							{isVacation && !hasWork ? 'bg-amber-100' : ''}
-							{isSick && !hasWork ? 'bg-red-100' : ''}
-							{!hasWork && !isVacation && !isSick ? 'hover:bg-gray-100' : ''}"
+							{statHoliday && !hasWork && !isSelected ? 'border-2 border-purple-400' : ''}
+							{isVacation && !hasWork && !statHoliday && !isSelected ? 'border-2 border-amber-400' : ''}
+							{isSick && !hasWork && !statHoliday && !isSelected ? 'border-2 border-red-400' : ''}
+							{!hasWork && !isVacation && !isSick && !statHoliday && !isSelected ? 'hover:bg-gray-100' : ''}"
+						title={statHoliday ? statHoliday.name : ''}
 					>
 						<span class="font-medium">{day}</span>
 						{#if hasWork}
 							<span class="text-[10px] opacity-90">{formatCurrency(dayEarnings).replace('CA$', '$')}</span>
+						{:else if statHoliday}
+							<span class="text-[8px] text-purple-700 leading-tight text-center truncate w-full px-0.5">{statHoliday.name.split(' ')[0]}</span>
 						{:else if isVacation}
 							<span class="text-[12px]">🏖️</span>
 						{:else if isSick}

@@ -10,7 +10,7 @@ function createShareGroupsStore() {
 
     async load() {
       try {
-        const result = await database.select<ShareGroup[]>(
+        const result = await database.query<ShareGroup>(
           'SELECT * FROM share_groups ORDER BY created_at DESC'
         );
         set(result);
@@ -22,14 +22,14 @@ function createShareGroupsStore() {
 
     async add(group: Omit<ShareGroup, 'id' | 'created_at'>) {
       try {
-        const result = await database.execute(
+        const result = await database.run(
           `INSERT INTO share_groups (name, platform, identifier)
            VALUES (?, ?, ?)`,
           [group.name, group.platform, group.identifier]
         );
 
         const newGroup: ShareGroup = {
-          id: result.lastInsertId as number,
+          id: result.lastId,
           ...group,
           created_at: new Date().toISOString()
         };
@@ -54,7 +54,7 @@ function createShareGroupsStore() {
 
         values.push(id);
 
-        await database.execute(
+        await database.run(
           `UPDATE share_groups SET ${setClauses.join(', ')} WHERE id = ?`,
           values
         );
@@ -68,7 +68,7 @@ function createShareGroupsStore() {
 
     async remove(id: number) {
       try {
-        await database.execute('DELETE FROM share_groups WHERE id = ?', [id]);
+        await database.run('DELETE FROM share_groups WHERE id = ?', [id]);
         update(groups => groups.filter(g => g.id !== id));
       } catch (error) {
         console.error('Failed to delete share group:', error);

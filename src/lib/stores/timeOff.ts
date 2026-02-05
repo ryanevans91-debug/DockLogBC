@@ -10,7 +10,7 @@ function createTimeOffStore() {
 
     async load() {
       try {
-        const result = await database.select<TimeOff[]>(
+        const result = await database.query<TimeOff>(
           'SELECT * FROM time_off ORDER BY date DESC'
         );
         set(result);
@@ -23,20 +23,20 @@ function createTimeOffStore() {
     async add(timeOff: Omit<TimeOff, 'id' | 'created_at'>) {
       try {
         // Check if date already exists
-        const existing = await database.select<TimeOff[]>(
+        const existing = await database.query<TimeOff>(
           'SELECT * FROM time_off WHERE date = ?',
           [timeOff.date]
         );
 
         if (existing.length > 0) {
           // Update existing
-          await database.execute(
+          await database.run(
             'UPDATE time_off SET type = ?, notes = ? WHERE date = ?',
             [timeOff.type, timeOff.notes, timeOff.date]
           );
         } else {
           // Insert new
-          await database.execute(
+          await database.run(
             'INSERT INTO time_off (date, type, notes) VALUES (?, ?, ?)',
             [timeOff.date, timeOff.type, timeOff.notes]
           );
@@ -51,7 +51,7 @@ function createTimeOffStore() {
 
     async remove(date: string) {
       try {
-        await database.execute('DELETE FROM time_off WHERE date = ?', [date]);
+        await database.run('DELETE FROM time_off WHERE date = ?', [date]);
         update(items => items.filter(t => t.date !== date));
       } catch (error) {
         console.error('Failed to remove time off:', error);
@@ -61,7 +61,7 @@ function createTimeOffStore() {
 
     async removeById(id: number) {
       try {
-        await database.execute('DELETE FROM time_off WHERE id = ?', [id]);
+        await database.run('DELETE FROM time_off WHERE id = ?', [id]);
         update(items => items.filter(t => t.id !== id));
       } catch (error) {
         console.error('Failed to remove time off:', error);
@@ -71,7 +71,7 @@ function createTimeOffStore() {
 
     async getByDateRange(startDate: string, endDate: string): Promise<TimeOff[]> {
       try {
-        return await database.select<TimeOff[]>(
+        return await database.query<TimeOff>(
           'SELECT * FROM time_off WHERE date >= ? AND date <= ? ORDER BY date',
           [startDate, endDate]
         );
@@ -83,7 +83,7 @@ function createTimeOffStore() {
 
     async getByType(type: 'vacation' | 'sick'): Promise<TimeOff[]> {
       try {
-        return await database.select<TimeOff[]>(
+        return await database.query<TimeOff>(
           'SELECT * FROM time_off WHERE type = ? ORDER BY date DESC',
           [type]
         );
@@ -97,7 +97,7 @@ function createTimeOffStore() {
       const startOfYear = new Date(new Date().getFullYear(), 0, 1).toISOString().split('T')[0];
       const today = new Date().toISOString().split('T')[0];
       try {
-        return await database.select<TimeOff[]>(
+        return await database.query<TimeOff>(
           'SELECT * FROM time_off WHERE type = ? AND date >= ? AND date <= ? ORDER BY date DESC',
           [type, startOfYear, today]
         );
