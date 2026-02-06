@@ -1,6 +1,7 @@
 <script lang="ts">
-	import { user, ratedJobs, theme, entries, type ThemeMode } from '$lib/stores';
+	import { user, ratedJobs, theme, entries, documents, type ThemeMode } from '$lib/stores';
 	import { SHIFTS } from '$lib/db';
+	import { parsePaystubWithClaude, getAnthropicApiKey } from '$lib/utils/ai';
 
 	// Form state - populated from user store
 	let lastName = $state($user?.last_name || '');
@@ -70,6 +71,24 @@
 
 	let csvInputRef = $state<HTMLInputElement | null>(null);
 	let paystubInputRef = $state<HTMLInputElement | null>(null);
+	let processingPaystub = $state(false);
+	let showPaystubModal = $state(false);
+	let paystubData = $state<{
+		line_items: Array<{ date: string; type: string; rate: number; hours: number; amount: number }>;
+		gross_pay?: number;
+		net_pay?: number;
+		total_hours?: number;
+		hourly_rate?: number;
+		federal_tax?: number;
+		provincial_tax?: number;
+		cpp?: number;
+		ei?: number;
+		union_dues?: number;
+		pension_contribution?: number;
+		pay_period_start?: string;
+		pay_period_end?: string;
+	} | null>(null);
+	let paystubFile = $state<{ data: string; mimeType: string } | null>(null);
 
 	function triggerCsvImport() {
 		csvInputRef?.click();
@@ -86,43 +105,210 @@
 
 		input.value = '';
 
-		// For now, just save the paystub as a document
-		try {
-			const { Filesystem, Directory } = await import('@capacitor/filesystem');
-			const { documents } = await import('$lib/stores');
+		const apiKey = getAnthropicApiKey($user?.anthropic_api_key);
+		if (!apiKey) {
+			alert('AI extraction is not available. Please contact the developer.');
+			return;
+		}
 
-			const reader = new FileReader();
-			reader.onload = async (e) => {
+		processingPaystub = true;
+		const reader = new FileReader();
+		reader.onload = async (e) => {
+			try {
 				const data = e.target?.result as string;
-				const base64Data = data.split(',')[1];
+				paystubFile = { data: data.split(',')[1], mimeType: file.type };
 
-				const ext = file.type.includes('pdf') ? 'pdf' : 'jpg';
-				const fileName = `paystub_${Date.now()}.${ext}`;
+				const result = await parsePaystubWithClaude(apiKey, data);
+				console.log('Paystub result:', result);
 
-				const savedFile = await Filesystem.writeFile({
-					path: `documents/${fileName}`,
-					data: base64Data,
-					directory: Directory.Data,
-					recursive: true
-				});
+				if (result.success && result.data && !Array.isArray(result.data)) {
+					const extracted = result.data as any;
+					const lineItems = Array.isArray(extracted.line_items) ? extracted.line_items : [];
+					const totalHours = extracted.total_hours || extracted.hours_worked;
 
-				await documents.add({
-					name: `Pay Stub - ${new Date().toLocaleDateString('en-CA')}`,
-					type: ext === 'pdf' ? 'pdf' : 'image',
-					file_path: savedFile.uri || `documents/${fileName}`,
-					file_size: null,
-					mime_type: file.type,
-					category: 'pay_stub',
-					extracted_data: null,
-					notes: null
-				});
+					// Calculate hourly rate from the most common regular rate in line items
+					let hourlyRate: number | undefined;
+					const regularItems = lineItems.filter((li: any) => li.type === 'regular' && li.rate);
+					if (regularItems.length > 0) {
+						// Use the most common rate
+						const rateCounts: Record<number, number> = {};
+						for (const li of regularItems) {
+							rateCounts[li.rate] = (rateCounts[li.rate] || 0) + 1;
+						}
+						hourlyRate = Number(Object.entries(rateCounts).sort((a, b) => b[1] - a[1])[0][0]);
+					} else if (extracted.gross_pay && totalHours) {
+						hourlyRate = Math.round((extracted.gross_pay / totalHours) * 100) / 100;
+					}
 
-				alert('Paystub saved to Documents!');
-			};
-			reader.readAsDataURL(file);
+					paystubData = {
+						line_items: lineItems,
+						gross_pay: extracted.gross_pay,
+						net_pay: extracted.net_pay,
+						total_hours: totalHours,
+						hourly_rate: hourlyRate,
+						federal_tax: extracted.federal_tax,
+						provincial_tax: extracted.provincial_tax,
+						cpp: extracted.cpp,
+						ei: extracted.ei,
+						union_dues: extracted.union_dues,
+						pension_contribution: extracted.pension_contribution,
+						pay_period_start: extracted.pay_period_start,
+						pay_period_end: extracted.pay_period_end
+					};
+					processingPaystub = false;
+					showPaystubModal = true;
+				} else {
+					processingPaystub = false;
+					const errorMsg = result.error || 'Unknown error';
+					console.log('Paystub extraction failed:', errorMsg);
+					alert(`Could not extract data from paystub: ${errorMsg}`);
+				}
+			} catch (error) {
+				console.error('Paystub error:', error);
+				processingPaystub = false;
+				alert(`Failed to process paystub: ${error instanceof Error ? error.message : 'Unknown error'}`);
+			}
+		};
+		reader.readAsDataURL(file);
+	}
+
+	// Determine shift type by matching rate to user's configured rates
+	function getShiftTypeByRate(rate: number): 'day' | 'afternoon' | 'graveyard' {
+		if (!$user) return 'day';
+
+		const rates: Array<{ type: 'day' | 'afternoon' | 'graveyard'; rate: number | null }> = [
+			{ type: 'day', rate: $user.day_rate },
+			{ type: 'afternoon', rate: $user.afternoon_rate },
+			{ type: 'graveyard', rate: $user.graveyard_rate }
+		];
+
+		// Find closest matching rate
+		let bestMatch: 'day' | 'afternoon' | 'graveyard' = 'day';
+		let smallestDiff = Infinity;
+
+		for (const r of rates) {
+			if (r.rate) {
+				const diff = Math.abs(r.rate - rate);
+				if (diff < smallestDiff) {
+					smallestDiff = diff;
+					bestMatch = r.type;
+				}
+			}
+		}
+
+		return bestMatch;
+	}
+
+	async function savePaystubAndUpdateRates() {
+		if (!paystubFile || !paystubData) return;
+
+		try {
+			// 1. Save document
+			const { Filesystem, Directory } = await import('@capacitor/filesystem');
+			const ext = paystubFile.mimeType.includes('pdf') ? 'pdf' : 'jpg';
+			const fileName = `paystub_${Date.now()}.${ext}`;
+			const savedFile = await Filesystem.writeFile({
+				path: `documents/${fileName}`,
+				data: paystubFile.data,
+				directory: Directory.Data,
+				recursive: true
+			});
+
+			const periodLabel = paystubData.pay_period_end
+				? new Date(paystubData.pay_period_end).toLocaleDateString('en-CA')
+				: new Date().toLocaleDateString('en-CA');
+
+			await documents.add({
+				name: `Pay Stub - ${periodLabel}`,
+				type: ext === 'pdf' ? 'pdf' : 'image',
+				file_path: savedFile.uri || `documents/${fileName}`,
+				file_size: null,
+				mime_type: paystubFile.mimeType,
+				category: 'pay_stub',
+				extracted_data: JSON.stringify(paystubData),
+				notes: null
+			});
+
+			// 2. Update hourly rate
+			if (paystubData.hourly_rate && $user) {
+				await user.update({ day_rate: paystubData.hourly_rate });
+			}
+
+			// 3. Create work entries from line items
+			let entriesCreated = 0;
+			if (paystubData.line_items && paystubData.line_items.length > 0) {
+				// Group line items by date
+				const byDate: Record<string, { regular: typeof paystubData.line_items; overtime: typeof paystubData.line_items }> = {};
+
+				for (const item of paystubData.line_items) {
+					if (!item.date) continue;
+					if (!byDate[item.date]) {
+						byDate[item.date] = { regular: [], overtime: [] };
+					}
+					if (item.type === 'overtime') {
+						byDate[item.date].overtime.push(item);
+					} else {
+						byDate[item.date].regular.push(item);
+					}
+				}
+
+				// Check which dates already have entries
+				const allDates = Object.keys(byDate);
+				if (allDates.length > 0) {
+					const minDate = allDates.sort()[0];
+					const maxDate = allDates.sort().reverse()[0];
+					const existingEntries = await entries.loadDateRange(minDate, maxDate);
+					const existingDates = new Set(existingEntries.map(e => e.date));
+
+					for (const [date, items] of Object.entries(byDate)) {
+						if (existingDates.has(date)) continue;
+
+						// Sum regular hours and earnings for this date
+						const regularHours = items.regular.reduce((sum, li) => sum + (li.hours || 0), 0);
+						const overtimeHours = items.overtime.reduce((sum, li) => sum + (li.hours || 0), 0);
+						const totalEarnings = [...items.regular, ...items.overtime].reduce((sum, li) => sum + (li.amount || 0), 0);
+
+						// Determine shift from the regular rate
+						const regularRate = items.regular[0]?.rate;
+						const shiftType = regularRate ? getShiftTypeByRate(regularRate) : 'day';
+
+						await entries.add({
+							date,
+							shift_type: shiftType,
+							job_type: 'hall',
+							rated_job_id: null,
+							hall_job_name: 'Paystub Import',
+							hours: regularHours + overtimeHours,
+							location: null,
+							ship: null,
+							notes: overtimeHours > 0
+								? `Imported from paystub (${regularHours}h regular + ${overtimeHours}h overtime)`
+								: 'Imported from paystub',
+							earnings: totalEarnings ? Math.round(totalEarnings * 100) / 100 : null
+						});
+						entriesCreated++;
+					}
+				}
+			}
+
+			// 4. Update career hours
+			const totalHours = paystubData.total_hours || paystubData.line_items?.reduce((sum, li) => sum + (li.hours || 0), 0) || 0;
+			if (totalHours > 0 && $user) {
+				await user.update({ career_hours: ($user.career_hours || 0) + totalHours });
+			}
+
+			showPaystubModal = false;
+			paystubData = null;
+			paystubFile = null;
+
+			if (entriesCreated > 0) {
+				alert(`Pay stub saved! Created ${entriesCreated} work entries and updated your hourly rate.`);
+			} else {
+				alert('Pay stub saved and hourly rate updated. No new entries created (dates already had entries or no line items found).');
+			}
 		} catch (error) {
-			console.error('Paystub upload error:', error);
-			alert('Failed to upload paystub. Please try again.');
+			console.error('Save error:', error);
+			alert('Failed to save paystub.');
 		}
 	}
 
@@ -219,7 +405,7 @@
 	}
 </script>
 
-<div class="p-4 pb-24 space-y-6">
+<div class="p-4 pb-32 space-y-6">
 	<header class="mb-2">
 		<h1 class="text-2xl font-bold text-gray-900">Profile</h1>
 	</header>
@@ -494,7 +680,7 @@
 				</svg>
 				<div>
 					<p class="font-medium text-gray-900">Upload Paystub</p>
-					<p class="text-sm text-gray-500">Save paystub to documents</p>
+					<p class="text-sm text-gray-500">AI extracts pay data automatically</p>
 				</div>
 			</button>
 		</div>
@@ -554,3 +740,152 @@
 		<p>Made for ILWU Local 502</p>
 	</section>
 </div>
+
+<!-- Paystub Data Modal -->
+{#if showPaystubModal && paystubData}
+	<div class="fixed inset-0 bg-black/50 flex items-start justify-center pt-8 pb-24 px-4 z-[60] overflow-y-auto">
+		<div class="card w-full max-w-sm flex flex-col overflow-hidden">
+			<h2 class="text-lg font-semibold text-gray-900 mb-4 flex-shrink-0">Paystub Data Extracted</h2>
+
+			<div class="flex-1 overflow-y-auto min-h-0 space-y-2 mb-4">
+				{#if paystubData.pay_period_start && paystubData.pay_period_end}
+					<div class="flex justify-between text-sm">
+						<span class="text-gray-500">Pay Period:</span>
+						<span class="text-gray-600">{paystubData.pay_period_start} to {paystubData.pay_period_end}</span>
+					</div>
+				{/if}
+
+				<!-- Earnings Summary -->
+				{#if paystubData.gross_pay}
+					<div class="flex justify-between">
+						<span class="text-gray-600">Gross Pay:</span>
+						<span class="font-semibold text-gray-900">${paystubData.gross_pay.toFixed(2)}</span>
+					</div>
+				{/if}
+				{#if paystubData.net_pay}
+					<div class="flex justify-between">
+						<span class="text-gray-600">Net Pay:</span>
+						<span class="font-semibold text-green-600">${paystubData.net_pay.toFixed(2)}</span>
+					</div>
+				{/if}
+				{#if paystubData.total_hours}
+					<div class="flex justify-between">
+						<span class="text-gray-600">Total Hours:</span>
+						<span class="font-semibold text-gray-900">{paystubData.total_hours} hrs</span>
+					</div>
+				{/if}
+				{#if paystubData.hourly_rate}
+					<div class="flex justify-between p-2 bg-blue-50 rounded-lg">
+						<span class="text-blue-700">Hourly Rate:</span>
+						<span class="font-bold text-blue-700">${paystubData.hourly_rate.toFixed(2)}/hr</span>
+					</div>
+				{/if}
+
+				<!-- Line Items -->
+				{#if paystubData.line_items && paystubData.line_items.length > 0}
+					<div class="pt-2 mt-2 border-t border-gray-100">
+						<p class="text-xs text-gray-500 uppercase tracking-wide mb-2">Work Days ({paystubData.line_items.filter(li => li.type === 'regular').length} shifts)</p>
+						<div class="space-y-1">
+							{#each paystubData.line_items as item}
+								<div class="flex justify-between text-sm {item.type === 'overtime' ? 'text-amber-700 bg-amber-50 px-1 rounded' : ''}">
+									<span class="text-gray-600">
+										{item.date}
+										{#if item.type === 'overtime'}<span class="text-xs">(OT)</span>{/if}
+									</span>
+									<span class="text-gray-700">{item.hours}h @ ${item.rate} = ${item.amount.toFixed(2)}</span>
+								</div>
+							{/each}
+						</div>
+					</div>
+				{/if}
+
+				<!-- Deductions -->
+				{#if paystubData.federal_tax || paystubData.provincial_tax || paystubData.cpp || paystubData.ei || paystubData.union_dues || paystubData.pension_contribution}
+					<div class="pt-2 mt-2 border-t border-gray-100">
+						<p class="text-xs text-gray-500 uppercase tracking-wide mb-1">Deductions</p>
+						{#if paystubData.federal_tax}
+							<div class="flex justify-between text-sm">
+								<span class="text-gray-500">Federal Tax:</span>
+								<span class="text-gray-700">${paystubData.federal_tax.toFixed(2)}</span>
+							</div>
+						{/if}
+						{#if paystubData.provincial_tax}
+							<div class="flex justify-between text-sm">
+								<span class="text-gray-500">Provincial Tax:</span>
+								<span class="text-gray-700">${paystubData.provincial_tax.toFixed(2)}</span>
+							</div>
+						{/if}
+						{#if paystubData.cpp}
+							<div class="flex justify-between text-sm">
+								<span class="text-gray-500">CPP:</span>
+								<span class="text-gray-700">${paystubData.cpp.toFixed(2)}</span>
+							</div>
+						{/if}
+						{#if paystubData.ei}
+							<div class="flex justify-between text-sm">
+								<span class="text-gray-500">EI:</span>
+								<span class="text-gray-700">${paystubData.ei.toFixed(2)}</span>
+							</div>
+						{/if}
+						{#if paystubData.union_dues}
+							<div class="flex justify-between text-sm">
+								<span class="text-gray-500">Union Dues:</span>
+								<span class="text-gray-700">${paystubData.union_dues.toFixed(2)}</span>
+							</div>
+						{/if}
+						{#if paystubData.pension_contribution}
+							<div class="flex justify-between text-sm">
+								<span class="text-gray-500">Pension:</span>
+								<span class="text-gray-700">${paystubData.pension_contribution.toFixed(2)}</span>
+							</div>
+						{/if}
+					</div>
+				{/if}
+
+				<!-- What will happen -->
+				<div class="bg-gray-50 rounded-lg p-3 text-sm">
+					<p class="font-medium text-gray-700 mb-1">This will:</p>
+					<ul class="text-gray-600 space-y-0.5">
+						{#if paystubData.line_items && paystubData.line_items.length > 0}
+							{@const uniqueDates = new Set(paystubData.line_items.map(li => li.date))}
+							<li>- Create {uniqueDates.size} work entries from paystub dates</li>
+						{/if}
+						{#if paystubData.hourly_rate}
+							<li>- Update day rate to ${paystubData.hourly_rate.toFixed(2)}/hr</li>
+						{/if}
+						{#if paystubData.total_hours}
+							<li>- Add {paystubData.total_hours} hrs to career total</li>
+						{/if}
+						<li>- Save paystub to Documents</li>
+					</ul>
+				</div>
+			</div>
+
+			<div class="grid grid-cols-2 gap-3 flex-shrink-0 pt-3 border-t border-gray-200">
+				<button
+					onclick={() => { showPaystubModal = false; paystubData = null; paystubFile = null; }}
+					class="py-2 border border-gray-300 rounded-lg text-gray-700"
+				>
+					Cancel
+				</button>
+				<button
+					onclick={savePaystubAndUpdateRates}
+					class="py-2 bg-blue-600 text-white rounded-lg font-medium"
+				>
+					Save & Update
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- Processing Paystub Indicator -->
+{#if processingPaystub}
+	<div class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-[60]">
+		<div class="card w-full max-w-xs text-center py-8">
+			<div class="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+			<p class="text-gray-700 font-medium">Reading paystub...</p>
+			<p class="text-sm text-gray-500">Extracting pay info with AI</p>
+		</div>
+	</div>
+{/if}

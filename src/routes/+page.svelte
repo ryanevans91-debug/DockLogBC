@@ -7,7 +7,7 @@
 	import { goto } from '$app/navigation';
 	import { Browser } from '@capacitor/browser';
 	import { CapacitorHttp } from '@capacitor/core';
-	import { parseTimesheetWithGemini, parseStatScheduleWithGemini, parsePaystubWithClaude, getGeminiApiKey, getAnthropicApiKey, type ParsedTimesheetEntry } from '$lib/utils/gemini';
+	import { parseTimesheetWithAI, parseStatScheduleWithAI, getApiKey, type ParsedTimesheetEntry } from '$lib/utils/ai';
 	import { statHolidayQueries } from '$lib/db/queries';
 	import { loadStatHolidaysFromDb } from '$lib/constants/statHolidays';
 
@@ -22,127 +22,6 @@
 	let importFileName = $state('');
 	let importing = $state(false);
 	let parsingWithAI = $state(false);
-	let paystubInputRef = $state<HTMLInputElement | null>(null);
-	let showPaystubModal = $state(false);
-	let paystubData = $state<{
-		gross_pay?: number;
-		net_pay?: number;
-		hours_worked?: number;
-		hourly_rate?: number;
-		pay_period_start?: string;
-		pay_period_end?: string;
-	} | null>(null);
-	let paystubFile = $state<{ data: string; mimeType: string } | null>(null);
-	let processingPaystub = $state(false);
-
-	function triggerPaystubUpload() {
-		showDataModal = false;
-		paystubInputRef?.click();
-	}
-
-	async function handlePaystubUpload(event: Event) {
-		const input = event.target as HTMLInputElement;
-		const file = input.files?.[0];
-		if (!file) return;
-
-		input.value = '';
-
-		const apiKey = getAnthropicApiKey($user?.anthropic_api_key);
-		if (!apiKey) {
-			alert('Please add your Anthropic API key in Profile settings to extract paystub data.');
-			return;
-		}
-
-		processingPaystub = true;
-		const reader = new FileReader();
-		reader.onload = async (e) => {
-			try {
-				const data = e.target?.result as string;
-				paystubFile = { data: data.split(',')[1], mimeType: file.type };
-
-				// Use Claude AI to extract paystub data
-				const result = await parsePaystubWithClaude(apiKey, data);
-				console.log('Paystub result:', result);
-
-				if (result.success && result.data && !Array.isArray(result.data)) {
-					const extracted = result.data as any;
-					// Calculate hourly rate if we have gross pay and hours
-					let hourlyRate: number | undefined;
-					if (extracted.gross_pay && extracted.hours_worked) {
-						hourlyRate = Math.round((extracted.gross_pay / extracted.hours_worked) * 100) / 100;
-					}
-
-					paystubData = {
-						gross_pay: extracted.gross_pay,
-						net_pay: extracted.net_pay,
-						hours_worked: extracted.hours_worked,
-						hourly_rate: hourlyRate,
-						pay_period_start: extracted.pay_period_start,
-						pay_period_end: extracted.pay_period_end
-					};
-					processingPaystub = false;
-					showPaystubModal = true;
-				} else {
-					processingPaystub = false;
-					const errorMsg = result.error || 'Unknown error';
-					console.log('Paystub extraction failed:', errorMsg);
-					alert(`Could not extract data from paystub: ${errorMsg}`);
-				}
-			} catch (error) {
-				console.error('Paystub error:', error);
-				processingPaystub = false;
-				alert(`Failed to process paystub: ${error instanceof Error ? error.message : 'Unknown error'}`);
-			}
-		};
-		reader.readAsDataURL(file);
-	}
-
-	async function savePaystubAndUpdateRates() {
-		if (!paystubFile || !paystubData) return;
-
-		try {
-			// Save file to filesystem
-			const { Filesystem, Directory } = await import('@capacitor/filesystem');
-			const ext = paystubFile.mimeType.includes('pdf') ? 'pdf' : 'jpg';
-			const fileName = `paystub_${Date.now()}.${ext}`;
-			const savedFile = await Filesystem.writeFile({
-				path: `documents/${fileName}`,
-				data: paystubFile.data,
-				directory: Directory.Data,
-				recursive: true
-			});
-
-			// Save to documents
-			const { documents } = await import('$lib/stores');
-			const periodLabel = paystubData.pay_period_end
-				? new Date(paystubData.pay_period_end).toLocaleDateString('en-CA')
-				: new Date().toLocaleDateString('en-CA');
-
-			await documents.add({
-				name: `Pay Stub - ${periodLabel}`,
-				type: ext === 'pdf' ? 'pdf' : 'image',
-				file_path: savedFile.uri || `documents/${fileName}`,
-				file_size: null,
-				mime_type: paystubFile.mimeType,
-				category: 'pay_stub',
-				extracted_data: JSON.stringify(paystubData),
-				notes: null
-			});
-
-			// Update user's hourly rate if extracted
-			if (paystubData.hourly_rate && $user) {
-				await user.update({ day_rate: paystubData.hourly_rate });
-			}
-
-			showPaystubModal = false;
-			paystubData = null;
-			paystubFile = null;
-			alert('Pay stub saved! Your hourly rate has been updated.');
-		} catch (error) {
-			console.error('Save error:', error);
-			alert('Failed to save paystub.');
-		}
-	}
 
 	// Work pins data
 	interface WorkPins {
@@ -257,9 +136,9 @@
 		const isPdf = file.type === 'application/pdf';
 		const isCsv = file.name.endsWith('.csv');
 
-		const apiKey = getGeminiApiKey($user?.gemini_api_key);
+		const apiKey = getApiKey($user?.anthropic_api_key);
 		if ((isImage || isPdf) && !apiKey) {
-			alert('Please add your Gemini API key in Settings to import images and PDFs.');
+			alert('AI extraction is not available. Please contact the developer.');
 			input.value = '';
 			return;
 		}
@@ -282,7 +161,7 @@
 
 					// Try stat schedule first
 					console.log('Trying to parse as stat schedule...');
-					const statResult = await parseStatScheduleWithGemini(apiKey, base64);
+					const statResult = await parseStatScheduleWithAI(apiKey, base64);
 					console.log('Stat result:', statResult);
 
 					if (statResult.success && statResult.holidays && statResult.holidays.length > 0) {
@@ -308,7 +187,7 @@
 
 					// Not a stat schedule, try timesheet
 					console.log('Trying to parse as timesheet...');
-					const result = await parseTimesheetWithGemini(apiKey, null, base64);
+					const result = await parseTimesheetWithAI(apiKey, null, base64);
 					console.log('Timesheet result:', result);
 
 					if (result.success && Array.isArray(result.data) && result.data.length > 0) {
@@ -722,85 +601,3 @@
 	</div>
 {/if}
 
-<!-- Paystub Data Modal -->
-{#if showPaystubModal && paystubData}
-	<div class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-		<div class="card w-full max-w-sm">
-			<h2 class="text-lg font-semibold text-gray-900 mb-4">Paystub Data Extracted</h2>
-
-			<div class="space-y-3 mb-6">
-				{#if paystubData.gross_pay}
-					<div class="flex justify-between">
-						<span class="text-gray-600">Gross Pay:</span>
-						<span class="font-semibold text-gray-900">${paystubData.gross_pay.toFixed(2)}</span>
-					</div>
-				{/if}
-				{#if paystubData.net_pay}
-					<div class="flex justify-between">
-						<span class="text-gray-600">Net Pay:</span>
-						<span class="font-semibold text-green-600">${paystubData.net_pay.toFixed(2)}</span>
-					</div>
-				{/if}
-				{#if paystubData.hours_worked}
-					<div class="flex justify-between">
-						<span class="text-gray-600">Hours Worked:</span>
-						<span class="font-semibold text-gray-900">{paystubData.hours_worked} hrs</span>
-					</div>
-				{/if}
-				{#if paystubData.hourly_rate}
-					<div class="flex justify-between p-2 bg-blue-50 rounded-lg">
-						<span class="text-blue-700">Calculated Hourly Rate:</span>
-						<span class="font-bold text-blue-700">${paystubData.hourly_rate.toFixed(2)}/hr</span>
-					</div>
-				{/if}
-				{#if paystubData.pay_period_start && paystubData.pay_period_end}
-					<div class="flex justify-between text-sm">
-						<span class="text-gray-500">Pay Period:</span>
-						<span class="text-gray-600">{paystubData.pay_period_start} to {paystubData.pay_period_end}</span>
-					</div>
-				{/if}
-			</div>
-
-			{#if paystubData.hourly_rate}
-				<p class="text-sm text-gray-600 mb-4">
-					Save this paystub and update your hourly rate to ${paystubData.hourly_rate.toFixed(2)}/hr?
-				</p>
-			{/if}
-
-			<div class="grid grid-cols-2 gap-3">
-				<button
-					onclick={() => { showPaystubModal = false; paystubData = null; paystubFile = null; }}
-					class="py-2 border border-gray-300 rounded-lg text-gray-700"
-				>
-					Cancel
-				</button>
-				<button
-					onclick={savePaystubAndUpdateRates}
-					class="py-2 bg-blue-600 text-white rounded-lg font-medium"
-				>
-					Save & Update
-				</button>
-			</div>
-		</div>
-	</div>
-{/if}
-
-<!-- Processing Paystub Indicator -->
-{#if processingPaystub}
-	<div class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
-		<div class="card w-full max-w-xs text-center py-8">
-			<div class="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-			<p class="text-gray-700 font-medium">Reading paystub...</p>
-			<p class="text-sm text-gray-500">Extracting pay info with AI</p>
-		</div>
-	</div>
-{/if}
-
-<!-- Hidden file input for paystub upload -->
-<input
-	type="file"
-	accept="image/*,.pdf"
-	bind:this={paystubInputRef}
-	onchange={handlePaystubUpload}
-	class="hidden"
-/>

@@ -103,6 +103,12 @@
 <style>
   .nav-safe {
     padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+    /* Force GPU compositing to prevent jumping on Android scroll */
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+    will-change: transform;
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
   }
 
   .add-button {

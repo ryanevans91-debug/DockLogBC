@@ -4,7 +4,7 @@
 	import { Filesystem, Directory } from '@capacitor/filesystem';
 	import { Share } from '@capacitor/share';
 	import type { Document, ShareGroup } from '$lib/db';
-	import { parsePaystubWithClaude, getAnthropicApiKey, type ParsedPaystubData } from '$lib/utils/gemini';
+	import { parsePaystubWithClaude, getAnthropicApiKey, type ParsedPaystubData } from '$lib/utils/ai';
 	import { Browser } from '@capacitor/browser';
 
 	let loading = $state(true);
@@ -98,63 +98,61 @@
 		}
 	}
 
+	async function readFileData(doc: Document): Promise<string | null> {
+		try {
+			let file;
+			const fileName = doc.file_path.split('/').pop();
+
+			if (doc.file_path.startsWith('file://') || doc.file_path.includes('://')) {
+				try {
+					file = await Filesystem.readFile({ path: doc.file_path });
+				} catch {
+					file = await Filesystem.readFile({ path: `documents/${fileName}`, directory: Directory.Data });
+				}
+			} else {
+				file = await Filesystem.readFile({ path: `documents/${fileName}`, directory: Directory.Data });
+			}
+
+			return file.data as string;
+		} catch (error) {
+			console.error('File read error:', error);
+			return null;
+		}
+	}
+
 	async function openDocument(doc: Document) {
 		try {
 			if (doc.type === 'pdf') {
-				// For PDFs, open with native share which will use system PDF viewer
+				// Open PDF with system viewer via share
 				await Share.share({
 					files: [doc.file_path],
 					dialogTitle: doc.name
 				});
-			} else if (doc.type === 'image') {
-				// For images, show preview modal
-				previewDoc = doc;
+				return;
+			}
 
+			previewDoc = doc;
+			previewImageSrc = null;
+			showPreviewModal = true;
+
+			if (doc.type === 'image') {
 				// Check if we have a cached thumbnail
 				if (thumbnails[doc.id]) {
 					previewImageSrc = thumbnails[doc.id];
 				} else {
-					// Load the image fresh
-					previewImageSrc = null;
-					try {
-						// Try multiple path formats
-						let file;
-						const fileName = doc.file_path.split('/').pop();
-
-						// Try the stored path first (might be full URI)
-						if (doc.file_path.startsWith('file://') || doc.file_path.includes('://')) {
-							try {
-								file = await Filesystem.readFile({
-									path: doc.file_path
-								});
-							} catch {
-								// Try documents folder
-								file = await Filesystem.readFile({
-									path: `documents/${fileName}`,
-									directory: Directory.Data
-								});
-							}
-						} else {
-							// Try documents folder
-							file = await Filesystem.readFile({
-								path: `documents/${fileName}`,
-								directory: Directory.Data
-							});
-						}
-
+					const base64Data = await readFileData(doc);
+					if (base64Data) {
 						const mimeType = doc.mime_type || 'image/jpeg';
-						previewImageSrc = `data:${mimeType};base64,${file.data}`;
-						// Cache it for next time
+						previewImageSrc = `data:${mimeType};base64,${base64Data}`;
 						thumbnails[doc.id] = previewImageSrc;
-					} catch (error) {
-						console.error('Image load error:', error);
-						// Show error state
+					} else {
 						previewImageSrc = 'error';
 					}
 				}
-				showPreviewModal = true;
 			} else {
 				// Fallback - use share
+				showPreviewModal = false;
+				previewDoc = null;
 				await Share.share({
 					files: [doc.file_path],
 					dialogTitle: doc.name
@@ -782,7 +780,7 @@
 	</div>
 {/if}
 
-<!-- Image Preview Modal -->
+<!-- Document Preview Modal -->
 {#if showPreviewModal && previewDoc}
 	<div class="fixed inset-0 bg-black/90 flex items-center justify-center z-50">
 		<button
@@ -801,7 +799,7 @@
 					<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-16 h-16 text-gray-400 mx-auto mb-4">
 						<path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15.75l5.159-5.159a2.25 2.25 0 013.182 0l5.159 5.159m-1.5-1.5l1.409-1.409a2.25 2.25 0 013.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 001.5-1.5V6a1.5 1.5 0 00-1.5-1.5H3.75A1.5 1.5 0 002.25 6v12a1.5 1.5 0 001.5 1.5zm10.5-11.25h.008v.008h-.008V8.25zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z" />
 					</svg>
-					<p class="text-gray-400">Could not load image</p>
+					<p class="text-gray-400">Could not load file</p>
 				</div>
 			{:else if previewImageSrc && previewImageSrc.startsWith('data:')}
 				<img

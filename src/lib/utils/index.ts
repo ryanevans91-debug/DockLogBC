@@ -1,2 +1,2 @@
 export * from './stats';
-export * from './gemini';
+export * from './ai';
