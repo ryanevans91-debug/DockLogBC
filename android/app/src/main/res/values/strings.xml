@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">DockLogger</string>
-    <string name="title_activity_main">DockLogger</string>
+    <string name="app_name">DockLogBC</string>
+    <string name="title_activity_main">DockLogBC</string>
     <string name="package_name">com.docklogger.app</string>
     <string name="custom_url_scheme">com.docklogger.app</string>
 </resources>

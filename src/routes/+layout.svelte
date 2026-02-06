@@ -68,7 +68,7 @@
 	<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 	<meta name="apple-mobile-web-app-capable" content="yes" />
 	<meta name="apple-mobile-web-app-status-bar-style" content="default" />
-	<title>DockLogger</title>
+	<title>DockLogBC</title>
 </svelte:head>
 
 {#if error}
@@ -88,7 +88,7 @@
 	<div class="min-h-screen flex items-center justify-center">
 		<div class="text-center">
 			<div class="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-			<p class="text-gray-600">Loading DockLogger...</p>
+			<p class="text-gray-600">Loading DockLogBC...</p>
 		</div>
 	</div>
 {:else}

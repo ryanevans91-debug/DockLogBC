@@ -347,7 +347,7 @@
 			const url = URL.createObjectURL(blob);
 			const link = document.createElement('a');
 			link.setAttribute('href', url);
-			link.setAttribute('download', `docklogger-export-${new Date().toISOString().split('T')[0]}.csv`);
+			link.setAttribute('download', `docklogbc-export-${new Date().toISOString().split('T')[0]}.csv`);
 			document.body.appendChild(link);
 			link.click();
 			document.body.removeChild(link);

@@ -94,7 +94,7 @@
 <div class="min-h-screen bg-gray-50 p-4">
 	<!-- Header -->
 	<div class="mb-8">
-		<h1 class="text-2xl font-bold text-gray-900">Welcome to DockLogger</h1>
+		<h1 class="text-2xl font-bold text-gray-900">Welcome to DockLogBC</h1>
 		<p class="text-gray-600 mt-1">Let's set up your profile</p>
 
 		<!-- Progress indicator -->

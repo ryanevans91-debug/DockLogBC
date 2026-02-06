@@ -781,7 +781,7 @@
 				PayPal
 			</a>
 		</div>
-		<p class="text-sm text-gray-400 mt-3">DockLogger v1.0.0</p>
+		<p class="text-sm text-gray-400 mt-3">DockLogBC v1.1.0</p>
 	</section>
 </div>
 

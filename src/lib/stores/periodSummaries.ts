@@ -131,7 +131,7 @@ function createPeriodSummariesStore() {
         // Also save as a document for user review
         const docName = `Period Summary - ${previousPeriod.label}`;
         const docContent = `
-DOCKLOGGER PERIOD SUMMARY
+DOCKLOGBC PERIOD SUMMARY
 ${previousPeriod.label}
 ========================
 

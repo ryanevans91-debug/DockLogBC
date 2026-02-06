@@ -2,7 +2,7 @@ import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
   appId: 'com.docklogger.app',
-  appName: 'DockLogger',
+  appName: 'DockLogBC',
   webDir: 'build',
   plugins: {
     CapacitorSQLite: {
